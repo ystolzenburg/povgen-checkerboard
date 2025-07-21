@@ -7,19 +7,20 @@ import argparse
 
 script_background = "background { color rgb <0.27, 0.27, 0.27> }"
 script_head = """
+#version 3.7
 #declare lens=camera{perspective location <0, 16,-50>  look_at <0,0,0>  angle 12};
 camera{lens}
 light_source{<20, 10, 7>  color rgb <1.00, 1.00, 1.00> area_light 6*x, 6*y, 12, 12}
 union{"""
 
-script_end_x = """
+script_end = """
 rotate y * 45}
 polygon{4, <-2.000000, 1.850000, -8.000000> <-2.000000, -0.200000, -8.000000> <2.000000, -0.200000, -8.000000> <2.000000, 1.850000, -8.000000>
 rotate x *15
 translate<0, -2.3, 0>
 texture{pigment {color rgb <2.126000, 2.126000, 2.126000> transmit 0.400000}}}
 """
-script_end = "rotate y * 45}"
+script_end_x = "rotate y * 45}"
 
 reference_end = """
 rotate y * 45}
@@ -29,57 +30,57 @@ translate<0, -2.3, 0>
 texture{pigment {color rgb <1,1,1>}}}
 """
 
-def michelson_contrast(L1, L2, eps=1e-6):
-    return abs(L1 - L2) / (L1 + L2 + eps)
-
-def get_neighbors(array: np.ndarray, i: int, j: int):
+def get_neighbors(grid, i, j):
     neighbors = []
-    rows, cols = array.shape
-    for di in [-1, 0, 1]:
-        for dj in [-1, 0, 1]:
-            if di == 0 and dj == 0:
-                continue
-            ni, nj = i + di, j + dj
-            if 0 <= ni < rows and 0 <= nj < cols:
-                neighbors.append(array[ni, nj])
+    for di, dj in [(-1,0),(1,0),(0,-1),(0,1)]:
+        ni, nj = i + di, j + dj
+        if 0 <= ni < 8 and 0 <= nj < 8 and grid[ni][nj] >= 0:
+            neighbors.append(grid[ni][nj])
     return neighbors
 
-def gen_shades(
-    grid_size: int,
-    target_luminance: float = 0.5,
-    diff_interval: list[float] = [0.05, 1],
-    max_attempts: int = 1_000_000_000,
-    accuracy: float = 0.001
-) -> np.ndarray:
-    grid = np.full((grid_size, grid_size), np.random.uniform(0, 1))
-    luminance_attempts = 0
-    while (abs(grid.mean() - target_luminance) > accuracy and luminance_attempts <= max_attempts):
-        for i in range(grid_size):
-            for j in range(grid_size):
-                attempts = 0
-                while attempts < max_attempts:
-                    print(f"\rAttempt {luminance_attempts} to match luminance within reach of {accuracy}. Currently {grid.mean()}. Attempt {attempts} trying to find matching colors for {[i,j]}", end="", flush=True)
-                    random_color = np.random.uniform(0, 1)
-                    nbs = get_neighbors(grid, i, j)
-                    valid = True
-                    for k in nbs:
-                        diff = abs(random_color - k)
-                        lower, upper = min(diff_interval), max(diff_interval)
-                        if not (lower <= diff <= upper):
-                            valid = False
-                            break
-                    if valid:
-                        grid[i][j] = random_color
-                        break
-                    attempts += 1
-    
-                if grid[i][j] == -1:
-                    print(f"Couldn't generate valid color at ({i},{j}) after {attempts} attempts.")
-                    exit(1)
-        luminance_attempts += 1    
-    print(f"\nGrid Luminance: {grid.mean()}", end="\n", flush=True)
+def generate_luminance_matched_values(target_luminance, total=64):
+    vals = np.random.uniform(0, 1, total)
+    current_mean = vals.mean()
+    diff = target_luminance - current_mean
+    vals += diff
+    vals = np.clip(vals, 0, 1)
+    vals *= target_luminance / vals.mean()
+    return vals
+
+def is_valid_placement(grid, i, j, val, diff_interval):
+    neighbors = get_neighbors(grid, i, j)
+    for nb in neighbors:
+        diff = abs(val - nb)
+        if not (diff_interval[0] <= diff and diff <= diff_interval[1]):
+            return False
+    return True
+
+def fill_grid(values, diff_interval):
+    grid = np.full((8, 8), -1.0)
+    positions = [(i, j) for i in range(8) for j in range(8)]
+    idx = 0
+
+    for i, j in positions:
+        placed = False
+        for _ in range(len(values)):
+            val = values[idx % len(values)]
+            idx += 1
+            if is_valid_placement(grid, i, j, val, diff_interval):
+                grid[i, j] = val
+                placed = True
+                break
+        if not placed:
+            return None
     return grid
 
+def gen_shades(target_luminance=0.5, diff_interval=[0.05, 1.0], attempts=100_000, accuracy=0.00001):
+    for _ in range(attempts):
+        values = generate_luminance_matched_values(target_luminance)
+        np.random.shuffle(values)
+        grid = fill_grid(values, diff_interval)
+        if grid is not None and abs(grid.mean() - target_luminance) <= accuracy:
+            return grid
+    raise ValueError("Failed to generate a valid grid within constraints")
 
 
 class Coordinate3D:
@@ -101,16 +102,15 @@ def add_box(topLeft: Coordinate3D, bottomRight: Coordinate3D, color: Coordinate3
     return "box{"+str(topLeft)+","+str(bottomRight)+" pigment{ color rgb "+str(color)+" }}\n"
 
 
-def gen_grid(grid_size: int, box_size: float, colors: np.ndarray):
-    base = -(box_size*grid_size)/2
-
+def gen_grid(colors: np.ndarray):
+    base = -(0.73*8)/2
     return_str = ""
-    for i in range(grid_size):
-        for j in range(grid_size):
+    for i in range(8):
+        for j in range(8):
             color = colors[i,j]
             return_str += add_box(
-                Coordinate3D(base+box_size*j,     -1,   base+box_size*i),
-                Coordinate3D(base+box_size*(j+1), -0.71,base+box_size*(i+1)),
+                Coordinate3D(base+0.73*j,     -1,   base+0.73*i),
+                Coordinate3D(base+0.73*(j+1), -0.71,base+0.73*(i+1)),
                 Coordinate3D(color, color, color))
 
     return return_str
@@ -164,25 +164,24 @@ def open_img(path):
 
 def main():
     parser = argparse.ArgumentParser(description="Example script")
-    parser.add_argument("--grid-size", type=int, help="set checkerboard grid size", default=8)
-    parser.add_argument("--cube-size", type=float, help="set single checkerbox cube size", default=0.73)
-    parser.add_argument("allowed_differences", nargs=4, type=float, help="<min bg> <max bg> <min cutout> <max cutout>")
+    parser.add_argument("allowed_differences", nargs=3, type=float, help="<min> <max> <alpha>")
     args = parser.parse_args()
-    min_diff_bg, max_diff_bg, min_diff_ct ,max_diff_ct = args.allowed_differences
-    cube_size = args.cube_size
+    min, max, alpha = args.allowed_differences
 
-    print("calculating background colors (difference min:", str(min_diff_bg), "max:", str(max_diff_bg),")...")
-    colors_bg = gen_shades(grid_size=args.grid_size, diff_interval=[min_diff_bg, max_diff_bg])
+    print("calculating background colors (difference min:", str(min), "max:", str(max),")...")
+    shades = gen_shades(diff_interval=[min, max])
+    m = shades.mean()
+    compressed_shades = (shades - m) * alpha + m    
     
-    print("rendering background with " + str(args.grid_size) + "x" + str(args.grid_size) + " cubes...")
-    render_string_bg = script_background+script_head+gen_grid(args.grid_size, cube_size, colors_bg)+script_end
+    print("Cutout mean:", m, "New mean:", compressed_shades.mean())
+    print("Cutout range:", shades.min(), "to", shades.max())
+    print("Compressed range:", compressed_shades.min(), "to", compressed_shades.max())
+    print("rendering background with 8x8 cubes...")
+    render_string_bg = script_background+script_head+gen_grid(compressed_shades)+script_end
     background = render_img(render_string_bg, "background")
-    
-    print("calculating cutout colors (difference min:", str(min_diff_ct), "max:", str(max_diff_ct),")...")
-    colors_ct = gen_shades(grid_size=args.grid_size, diff_interval=[min_diff_ct, max_diff_ct])
         
-    print("rendering cutout with " + str(args.grid_size) + "x" + str(args.grid_size) + " cubes...")
-    render_string_ct = script_background+script_head+gen_grid(args.grid_size, cube_size, colors_ct)+script_end
+    print("rendering cutout with 8x8 cubes...")
+    render_string_ct = script_background+script_head+gen_grid(shades)+script_end
     cutout = render_img(render_string_ct, "cutout")
     
     print("rendering cropping range...")
@@ -199,6 +198,7 @@ def main():
         target_img.paste(cropped, crop_box[:2], cropped)
         target_img.save("result.png")
         print("done!")
+        open_img("images/cutout.png")
         open_img("result.png")
     else:
         print("crop box couldn't be generated")
